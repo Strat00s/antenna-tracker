@@ -1,0 +1,21 @@
+## Implementation
+- Steppers
+    - Modular speed
+- Endstops
+    - Homing
+- Getting data from radio
+    - UART
+    - USB VCP
+    - SBUS?
+    - Messages:
+        - LAT D.M.S
+        - LON D.M.S
+        - ALT HEIGHT_IN_M
+- GPS comms
+    - Get data from GPS
+- Compass
+    - Get data from compass
+    - Calibration
+- Interface
+    - Simple OLED interface
+    - 5 way joystick or 3 buttons
