@@ -1,5 +1,7 @@
 # antenna-tracker
 Simple antenna tracker for RC models.
+Using https://github.com/earlephilhower/arduino-pico (instalation: https://arduino-pico.readthedocs.io/en/latest/platformio.html)
+
 
 # Positions
 Yaw - rotation
@@ -46,7 +48,7 @@ Pitch - eleveation
 
 # Communication
 ### Protocol
-ACTION DATA ACTION2 DATA2 ...
+ACTION DATA\n (data are optional for some actions)
 ### Messages
 #### Mandatory (always sent)
 - UAV_LAT D.M.S
