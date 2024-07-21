@@ -5,6 +5,7 @@
 #include <SPI.h>
 #include <string>
 #include <vector>
+#include <deque>
 #include <FreeRTOS.h>
 #include <task.h>
 
@@ -38,6 +39,13 @@ using namespace std;
 //comms
 #define COMMS_TX
 #define COMMS_RX
+
+#define PITCH_RATIO 50 / 14
+//#define YAW_RATIO 60 / 20
+#define YAW_RATIO 60 / 25
+
+#define deg2step(deg, ratio) (deg * 32 * 63.68395 / 360 * ratio)
+
 
 
 xTaskHandle gps_task;
@@ -84,130 +92,134 @@ int pitch_dir = 1;
 bool yaw_calibrated = false;
 bool pitch_calibrated = false;
 
-uint32_t pitch_steps = 0;
-uint32_t yaw_steps = 0;
+bool yaw_homed = false;
+bool pitch_homed = false;
+
+long pitch_steps = 999999;
+long yaw_steps   = 999999;
 
 
-void movePitchTo(int pos, int speed = 500) {
-    stepper_pitch.moveTo(pos * pitch_dir);
+void movePitch(int speed = 500) {
+    if (!pitch_homed) {
+        printf("Need to home PITCH axis first!\n");
+        return;
+    }
     while (stepper_pitch.distanceToGo()) {
+        if (stepper_pitch.distanceToGo() * pitch_dir < 0 && !digitalRead(ENDSTOP_PITCH_MIN))
+            break;
+        if (stepper_pitch.distanceToGo() * pitch_dir > 0 && stepper_pitch.currentPosition() * pitch_dir >= pitch_steps)
+            break;
         stepper_pitch.setSpeed(speed);
         stepper_pitch.runSpeedToPosition();
     }
+    printf("PITCH: %d\n", stepper_pitch.currentPosition());
+}
+
+void moveYaw(int speed = 500) {
+    if (!yaw_homed) {
+        printf("Need to home YAW axis first!\n");
+        return;
+    }
+    while (stepper_yaw.distanceToGo()) {
+        if ((stepper_yaw.distanceToGo() * yaw_dir > 0 && !digitalRead(ENDSTOP_YAW_MAX)) || (stepper_yaw.distanceToGo() * yaw_dir < 0 && !digitalRead(ENDSTOP_YAW_MIN)))
+            break;
+        stepper_yaw.setSpeed(speed);
+        stepper_yaw.runSpeedToPosition();
+    }
+    printf("YAW: %d\n", stepper_yaw.currentPosition());
+}
+
+void movePitchTo(int pos, int speed = 500) {
+    stepper_pitch.moveTo(pos * pitch_dir);
+    movePitch(speed);
 }
 
 void moveYawTo(int pos, int speed = 500) {
     stepper_yaw.moveTo(pos * yaw_dir);
-    while (stepper_yaw.distanceToGo()) {
-        stepper_yaw.setSpeed(speed);
-        stepper_yaw.runSpeedToPosition();
-    }
+    moveYaw(speed);
 }
 
 void movePitchBy(int pos, int speed = 500) {
     stepper_pitch.move(pos * pitch_dir);
-    while (stepper_pitch.distanceToGo()) {
-        stepper_pitch.setSpeed(speed);
-        stepper_pitch.runSpeedToPosition();
-    }
+    movePitch(speed);
 }
 
 void moveYawBy(int pos, int speed = 500) {
     stepper_yaw.move(pos * yaw_dir);
-    while (stepper_yaw.distanceToGo()) {
-        stepper_yaw.setSpeed(speed);
-        stepper_yaw.runSpeedToPosition();
-    }
+        moveYaw(speed);
+
 }
 
 
 void calibratePitch() {
     printf("Calibrating PITCH\n");
     stepper_pitch.move(4000 * pitch_dir);
-
+    int togo_orig = stepper_yaw.distanceToGo();
     //move yaw in loop until endstop is hit
     while (stepper_pitch.distanceToGo()) {
-        if (!digitalRead(ENDSTOP_PITCH_MIN) && stepper_pitch.distanceToGo() < 2700)
+        if (!digitalRead(ENDSTOP_PITCH_MIN) && abs(togo_orig - stepper_yaw.distanceToGo()) > 300)
             break;
-
         stepper_pitch.setSpeed(700);
         stepper_pitch.runSpeedToPosition();
     }
 
+
     //wrong direction
     if (!digitalRead(ENDSTOP_PITCH_MIN)) {
         pitch_dir = -1;
-        stepper_pitch.move(3000 * pitch_dir);
-        while (stepper_pitch.distanceToGo()) {
-            stepper_pitch.setSpeed(700);
-            stepper_pitch.runSpeedToPosition();
-        }
+        movePitchBy(4000);
     }
     stepper_pitch.setCurrentPosition(0);
-
-    stepper_pitch.move(-30000 * pitch_dir);
-    while (digitalRead(ENDSTOP_PITCH_MIN)) {
-        stepper_pitch.setSpeed(500);
-        stepper_pitch.runSpeedToPosition();
-    }
-
+    movePitchBy(-30000);
     pitch_steps = abs(stepper_pitch.currentPosition());
     stepper_pitch.setCurrentPosition(0);
-
     pitch_calibrated = true;
 }
 
 void calibrateYaw() {
     printf("Calibrating YAW\n");
     stepper_yaw.move(60000 * yaw_dir);
-
+    int togo_orig = stepper_yaw.distanceToGo();
     //move yaw in loop until endstop is hit
-    while (digitalRead(ENDSTOP_YAW_MIN) && digitalRead(ENDSTOP_YAW_MAX)) {
+    while (stepper_yaw.distanceToGo()) {
+        if ((!digitalRead(ENDSTOP_YAW_MIN) || !digitalRead(ENDSTOP_YAW_MAX)) && abs(togo_orig - stepper_yaw.distanceToGo()) > 300)
+            break;
         stepper_yaw.setSpeed(500);
         stepper_yaw.runSpeedToPosition();
     }
-
+    
     stepper_yaw.setCurrentPosition(0);
 
     //flip direction if we moved clockwise instead of counter-clockwise and hit MIN endstop
     yaw_dir = !digitalRead(ENDSTOP_YAW_MAX) ? 1 : -1;
 
-    if (!digitalRead(ENDSTOP_YAW_MIN)) {
-        stepper_yaw.move(60000 * yaw_dir);
-        while (digitalRead(ENDSTOP_YAW_MAX)) {
-            stepper_yaw.setSpeed(500);
-            stepper_yaw.runSpeedToPosition();
-        }
-    }
-    else if (!digitalRead(ENDSTOP_YAW_MAX)) {
-        stepper_yaw.move(-60000 * yaw_dir);
-        while (digitalRead(ENDSTOP_YAW_MIN)) {
-            stepper_yaw.setSpeed(500);
-            stepper_yaw.runSpeedToPosition();
-        }
-    }
-
-    stepper_yaw.moveTo(abs(stepper_yaw.currentPosition()) / 2 * yaw_dir);
-    while (stepper_yaw.distanceToGo()) {
-        stepper_yaw.setSpeed(500);
-        stepper_yaw.runSpeedToPosition();
-    }
-
-    pitch_steps = stepper_yaw.currentPosition();
-    stepper_yaw.setCurrentPosition(0);
-
+    if (!digitalRead(ENDSTOP_YAW_MIN))
+        moveYawBy(60000);
+    else if (!digitalRead(ENDSTOP_YAW_MAX))
+        moveYawBy(-60000);
+    yaw_steps = abs(stepper_yaw.currentPosition());
+    stepper_yaw.setCurrentPosition(yaw_steps / 2 * yaw_dir);
     yaw_calibrated = true;
 }
 
+
 void homePitch() {
+    yaw_homed = true;
     if (!pitch_calibrated)
         calibratePitch();
+    else
+        movePitchBy(-9999999);
+    stepper_pitch.setCurrentPosition(0);
     movePitchTo(0);
 }
 
 void homeYaw() {
+    yaw_homed = true;
     if (!yaw_calibrated)
         calibrateYaw();
+    else
+        moveYawBy(9999999);
+    stepper_yaw.setCurrentPosition(yaw_steps / 2 * yaw_dir);
     moveYawTo(0);
 }
 
@@ -234,7 +246,7 @@ void commsTask(void *) {
                 continue;
             }
 
-            if (!in.length())
+            if (!in.length() || c == '\r')
                 continue;
 
             printf("\n");
@@ -248,38 +260,66 @@ void commsTask(void *) {
                 arg = in.substr(split + 1);
             }
 
-            if (cmd == "UAV_LAT") {
-                printf("NOT YET IMPLEMENTED\n");
+
+            try {
+                if (cmd == "UAV_LAT") {
+                    printf("NOT YET IMPLEMENTED\n");
+                }
+                else if (cmd == "UAV_LON") {
+                    printf("NOT YET IMPLEMENTED\n");
+                }
+                else if (cmd == "UAV_ALT") {
+                    printf("NOT YET IMPLEMENTED\n");
+                }
+
+                else if (cmd == "ARMED") {
+                    printf("NOT YET IMPLEMENTED\n");
+                }
+
+                else if (cmd == "HOME_LAT") {
+                    printf("NOT YET IMPLEMENTED\n");
+                }
+                else if (cmd == "HOME_LON") {
+                    printf("NOT YET IMPLEMENTED\n");
+                }
+                else if (cmd == "HOME_ALT") {
+                    printf("NOT YET IMPLEMENTED\n");
+                }
+
+                else if (cmd == "MOVE_YAW_BY") {
+                    moveYawBy(deg2step(std::stoi(arg), YAW_RATIO));
+                }
+                else if (cmd == "MOVE_PITCH_BY") {
+                    movePitchBy(deg2step(std::stoi(arg), PITCH_RATIO));
+                }
+                else if (cmd == "MOVE_YAW_TO") {
+                    moveYawTo(deg2step(std::stoi(arg), YAW_RATIO));
+                }
+                else if (cmd == "MOVE_PITCH_TO") {
+                    movePitchTo(deg2step(std::stoi(arg), PITCH_RATIO));
+                }
+                else if (cmd == "HOME") {
+                    homePitch();
+                    homeYaw();
+                }
+                else if (cmd == "HOME_YAW") {
+                    homeYaw();
+                }
+                else if (cmd == "HOME_PITCH") {
+                    homePitch();
+                }
+                else if (cmd == "DISABLE_STEPPERS") {
+                    stepper_pitch.disableOutputs();
+                    stepper_yaw.disableOutputs();
+                    pitch_homed = false;
+                    yaw_homed = false;
+                }
+                else {
+                    printf("UNKNOWN COMMAND\n");
+                }
             }
-            else if (cmd == "UAV_LON") {
-                printf("NOT YET IMPLEMENTED\n");
-            }
-            else if (cmd == "UAV_ALT") {
-                printf("NOT YET IMPLEMENTED\n");
-            }
-            else if (cmd == "ARMED") {
-                printf("NOT YET IMPLEMENTED\n");
-            }
-            else if (cmd == "HOME_LAT") {
-                printf("NOT YET IMPLEMENTED\n");
-            }
-            else if (cmd == "HOME_LON") {
-                printf("NOT YET IMPLEMENTED\n");
-            }
-            else if (cmd == "HOME_ALT") {
-                printf("NOT YET IMPLEMENTED\n");
-            }
-            else if (cmd == "MANUAL_YAW") {
-                printf("NOT YET IMPLEMENTED\n");
-            }
-            else if (cmd == "MANUAL_PITCH") {
-                printf("NOT YET IMPLEMENTED\n");
-            }
-            else if (cmd == "HOME") {
-                printf("NOT YET IMPLEMENTED\n");
-            }
-            else {
-               printf("UNKNOWN COMMAND\n");
+            catch (exception ex) {
+                printf("Invalid argument\n");
             }
 
             in.clear();
@@ -300,6 +340,7 @@ void setup() {
     pinMode(ENDSTOP_PITCH_MIN, INPUT_PULLUP);
     pinMode(ENDSTOP_YAW_MIN, INPUT_PULLUP);
     pinMode(ENDSTOP_YAW_MAX, INPUT_PULLUP);
+    delay(3000);
     Serial.begin(115200);
 
     stepper_yaw.setMaxSpeed(1000);
@@ -311,6 +352,17 @@ void setup() {
 
     //homePitch();
     //homeYaw();
+//
+    //movePitchTo(deg2step(90, PITCH_RATIO));
+    //movePitchTo(deg2step(45, PITCH_RATIO));
+    //moveYawTo(deg2step(90,  YAW_RATIO));
+    //moveYawTo(deg2step(-90, YAW_RATIO));
+    //moveYawTo(deg2step(45,  YAW_RATIO));
+    //moveYawTo(deg2step(-45, YAW_RATIO));
+//
+    //homePitch();
+    //homeYaw();
+
 
     stepper_yaw.disableOutputs();
     stepper_pitch.disableOutputs();
