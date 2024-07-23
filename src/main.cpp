@@ -11,6 +11,7 @@
 #include <FreeRTOS.h>
 #include <task.h>
 #include "threadsafe_deque.hpp"
+#include "gps_manager.hpp"
 
 using namespace std;
 
@@ -50,6 +51,10 @@ using namespace std;
 
 #define deg2step(deg, ratio) (deg * 32 * 63.68395 / 360 * ratio)
 
+
+//TODO button controlls
+//TODO display
+//TODO GPS config (glonass, gps, beidu, galileo)
 
 
 xTaskHandle gps_task;
@@ -108,6 +113,7 @@ long yaw_steps   = 999999;
 GPSManager gps_manager;
 
 
+/*
 void movePitch(int speed = 500) {
     if (!pitch_homed) {
         printf("Need to home PITCH axis first!\n");
@@ -137,7 +143,9 @@ void moveYaw(int speed = 500) {
     }
     printf("YAW: %d\n", stepper_yaw.currentPosition());
 }
+*/
 
+/*
 void movePitchTo(int pos, int speed = 500) {
     stepper_pitch.moveTo(pos * pitch_dir);
     movePitch(speed);
@@ -147,7 +155,9 @@ void moveYawTo(int pos, int speed = 500) {
     stepper_yaw.moveTo(pos * yaw_dir);
     moveYaw(speed);
 }
+*/
 
+/*
 void movePitchBy(int pos, int speed = 500) {
     stepper_pitch.move(pos * pitch_dir);
     movePitch(speed);
@@ -158,7 +168,9 @@ void moveYawBy(int pos, int speed = 500) {
         moveYaw(speed);
 
 }
+*/
 
+/*
 void calibratePitch() {
     printf("Calibrating PITCH\n");
     stepper_pitch.move(4000 * pitch_dir);
@@ -209,7 +221,9 @@ void calibrateYaw() {
     stepper_yaw.setCurrentPosition(yaw_steps / 2 * yaw_dir);
     yaw_calibrated = true;
 }
+*/
 
+/*
 void homePitch() {
     pitch_homed = true;
     if (!pitch_calibrated)
@@ -229,30 +243,41 @@ void homeYaw() {
     stepper_yaw.setCurrentPosition(yaw_steps / 2 * yaw_dir);
     moveYawTo(0);
 }
+*/
 
-
+void stepperTask(void *) {
+    while (true) {
+        stepper_pitch.runSpeedToPosition();
+        stepper_yaw.runSpeedToPosition();
+    }
+}
 
 void gpsTask(void *) {
     GPS_SERIAL.setTX(GPS_RX);
     GPS_SERIAL.setRX(GPS_TX);
     GPS_SERIAL.setFIFOSize(256);
-    gps_manager.begin(&GPS_SERIAL, 115200);
+    int ret = gps_manager.begin(&GPS_SERIAL, 115200);
+    if (ret) {
+        printf("Failed to change baud rate: %d\n", ret);
+        //TODO report it somewhere
+    }
 
 
     deque<tuple<uint8_t, uint8_t, vector<uint8_t>>> msg_ubx_q;
-    msg_ubx_q.push_back({0x06, 0x17,{0, 0x4b, 0, 0b00001000, 0, 0, 0, 0, 1, 0, 0, 0x01, 0, 0, 0, 0, 0, 0, 0, 0}});
-    msg_ubx_q.push_back({0x06, 0x3E, {}});
+    //msg_ubx_q.push_back({0x06, 0x17,{0, 0x4b, 0, 0b00001000, 0, 0, 0, 0, 1, 0, 0, 0x01, 0, 0, 0, 0, 0, 0, 0, 0}});
+    //msg_ubx_q.push_back({0x06, 0x3E, {}});
     //msg_ubx_q.push_back({0x06, 0x02, {0, 0, 0, 0, 0b00011111, 1, 0, 0, 0, 0}});
     
     unsigned long timer = millis();
 
     while (true) {
         if (gps_manager.read()) {
-            Serial.printf("%d %02x %02x %d | ", gps_manager.last_msg.ubx, gps_manager.last_msg.cls, gps_manager.last_msg.id, gps_manager.last_msg.length);
-            for (auto byte : gps_manager.last_msg.payload) {
+            auto last_msg = gps_manager.getLastMsg();
+            Serial.printf("%d %02x %02x %d | ", last_msg.ubx, last_msg.cls, last_msg.id, last_msg.length);
+            for (auto byte : last_msg.payload) {
                 Serial.printf("%02x ", byte);
             }
-            Serial.printf("| %02x %02x\n", gps_manager.last_msg.cka, gps_manager.last_msg.ckb);
+            Serial.printf("| %02x %02x\n", last_msg.cka, last_msg.ckb);
         }
 
         //string tmp = gps_manager.read();
@@ -380,6 +405,7 @@ void setup() {
     delay(3000);
     Serial.begin(115200);
 
+    //xTaskCreate()
     xTaskCreate(gpsTask, "GPS", 2048, nullptr, 0, &gps_task);
     xTaskCreate(commsTask, "COMMS", 1024, nullptr, 0, &comms_task);
 
@@ -394,4 +420,9 @@ void setup() {
 
 void loop() {
     //vTaskDelay(1);
+    if (pitch_homed)
+        stepper_pitch.runSpeedToPosition();
+    if (yaw_homed)
+        stepper_yaw.runSpeedToPosition();
+
 }

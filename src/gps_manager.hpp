@@ -4,6 +4,7 @@
 
 using namespace std;
 
+//TODO wait for response on writes
 
 typedef struct{
     bool ubx;
@@ -25,20 +26,30 @@ public:
     ~GPSManager() = default;
 
     /** @brief Configure GPS baud rate*/
-    void begin(HardwareSerial *serial, unsigned long baud = 9600) {
+    int begin(HardwareSerial *serial, unsigned long baud = 9600) {
         this->serial = serial;
         serial->begin(9600);
-        setBaudRate(baud);
+        return setBaudRate(baud);
     }
 
-    void setBaudRate(uint32_t baud) {
+    int setBaudRate(uint32_t baud) {
         //TODO read config first and modify only baud
         //set baudrate, disable NMEA on uart
         write(0x06, 0x00, {1, 0, 0, 0, 0xC0, 0x08, 0, 0, uint8_t(baud), uint8_t(baud >> 8), uint8_t(baud >> 16), uint8_t(baud >> 24), 3, 0, 1, 0, 0, 0, 0, 0});
-        //TODO wait for response
-        delay(100);
+        serial->flush();
         serial->end();
         serial->begin(baud);
+        unsigned long timer = millis();
+        while (true) {
+            auto ret = read();
+            if (ret > 0)
+                break;
+            if (ret == -1)
+                return 1;
+            if (millis() - timer >= 1000)
+                return 2;
+        }
+        return 0;
     }
 
 
