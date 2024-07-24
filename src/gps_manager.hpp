@@ -21,6 +21,21 @@ private:
     HardwareSerial *serial = nullptr;
     gps_msg_t last_msg;
 
+    uint8_t getResponse() {
+        unsigned long timer = millis();
+        int32_t ret = 0;
+        while (ret >> 8 != 0x05) {
+            ret = read();
+            if (ret > 0)
+                timer = millis();
+            if (ret == -1)
+                return 2;
+            if (millis() - timer >= 1000)
+                return 3;
+        }
+        return uint8_t(ret) ? 0 : 1;
+    }
+
 public:
     GPSManager() = default;
     ~GPSManager() = default;
@@ -32,22 +47,34 @@ public:
         return setBaudRate(baud);
     }
 
-    int setBaudRate(uint32_t baud) {
+
+    uint8_t setBaudRate(uint32_t baud) {
         //TODO read config first and modify only baud
         //set baudrate, disable NMEA on uart
         write(0x06, 0x00, {1, 0, 0, 0, 0xC0, 0x08, 0, 0, uint8_t(baud), uint8_t(baud >> 8), uint8_t(baud >> 16), uint8_t(baud >> 24), 3, 0, 1, 0, 0, 0, 0, 0});
         serial->flush();
         serial->end();
         serial->begin(baud);
+        return getResponse();
+    }
+
+    uint8_t configure(uint8_t id, vector<uint8_t> payload) {
+        write(0x06, id, payload);
+        return getResponse();
+    }
+
+    uint8_t getVersion() {
+        write(0x0A, 0x04, {});
         unsigned long timer = millis();
-        while (true) {
-            auto ret = read();
+        int32_t ret = 0;
+        while (ret >> 8 != 0x05) {
+            ret = read();
             if (ret > 0)
                 break;
             if (ret == -1)
-                return 1;
-            if (millis() - timer >= 1000)
                 return 2;
+            if (millis() - timer >= 1000)
+                return 3;
         }
         return 0;
     }
@@ -86,11 +113,6 @@ public:
             msg[msg_len - 1] = msg[msg_len - 1] + msg[msg_len - 2];
         }
 
-        printf("UBX payload to sent (%d): ", msg.size());
-        for (size_t i = 0; i < msg.size(); i++) {
-            printf("%0x ", msg[i]);
-        }
-        printf("\n");
         serial->write(msg.data(), msg.size());
     }
 
@@ -103,7 +125,6 @@ public:
         uint8_t checksum = 0;
         for (const char *c = msg; *c != '\0'; c++)
             checksum ^= *c;
-        printf("$%s*%02x\r\n", msg, checksum);
         serial->printf("$%s*%02x\r\n", msg, checksum);
     }
 
@@ -127,7 +148,6 @@ public:
             
             //NMEA start
             if (c == '$' && state == 0) {
-                printf("$\n");
                 state = 1;
                 timer = millis();
                 last_msg.ubx = false;
@@ -144,7 +164,6 @@ public:
                     state = 2;
                 }
                 else {
-                    printf("PAYLOAD");
                     last_msg.length++;
                     last_msg.payload.push_back(c);
                 }
@@ -152,14 +171,12 @@ public:
             }
             //NMEA end
             else if (c == '\n' && state == 2) {
-                printf("\\n\n");
                 state = 0;
                 return uint16_t(last_msg.cls) << 8 | last_msg.id;
             }
 
             //UBX sync 1
             else if (c == 0xB5 && state == 0) {
-                printf("SYNC\n");
                 state = 3;
                 timer = millis();
                 last_msg.ubx = true;
@@ -173,38 +190,29 @@ public:
 
             //UBX sync 2
             else if (c == 0x62 && state == 3) {
-                printf("SYNC\n");
                 state = 4;
                 return 0;
             }
             //UBX class
             else if (state == 4) {
-                printf("CLASS\n");
-
                 state = 5;
                 last_msg.cls = c;
                 return 0;
             }
             //UBX ID
             else if (state == 5) {
-                printf("ID\n");
-
                 state = 6;
                 last_msg.id = c;
                 return 0;
             }
             //UBX len
             else if (state == 6) {
-                printf("LEN\n");
-
                 state = 7;
                 last_msg.length = uint16_t(c);
                 return 0;
             }
             //UBX len
             else if (state == 7) {
-                printf("LEN\n");
-
                 state = 8;
                 last_msg.length |= uint16_t(c) << 8;
                 len = last_msg.length;
@@ -213,8 +221,6 @@ public:
             }
             //UBX payload
             else if (len && state == 8) {
-                printf("PAYLOAD %d\n", len);
-
                 last_msg.payload.push_back(c);
                 len--;
                 if (!len)
@@ -223,16 +229,12 @@ public:
             }
             //UBX CKA
             else if (state == 9) {
-                printf("CKA\n");
-
                 state = 10;
                 last_msg.cka = c;
                 return 0;
             }
             //UBX CKB
             else if (state == 10) {
-                printf("CKB\n");
-
                 state = 0;
                 last_msg.ckb = c;
                 return uint16_t(last_msg.cls) << 8 | last_msg.id;
@@ -246,80 +248,4 @@ public:
         }
         return 0;
     }
-
-    /*
-    string read() {
-        static string msg = "";
-        static int state = 0;
-        static uint16_t msg_len = 0;
-        if (serial->available() > 0) {
-            int c = serial->read();
-            if (c < 0)
-                return "";
-            
-            if (c == '$' && state == 0) {
-                state = 1;
-                msg.clear();
-                msg += c;
-                return "";
-            }
-            else if (c == '\r' && state == 1) {
-                state = 2;
-                return "";
-            }            
-            else if (c == '\n' && state == 2) {
-                state = 0;
-                return msg;
-            }
-
-            else if (c == 0xB5 && state == 0) {
-                msg.clear();
-                msg += int2hex(c);
-                state = 3;
-                return "";
-            }
-            else if (c == 0x62 && state == 3) {
-                state = 4;
-                msg += int2hex(c);
-            }
-            else if (state == 4 || state == 5) {
-                state++;
-                msg += int2hex(c);
-                return "";
-            }
-            else if (state == 6) {
-                msg_len = uint16_t(c);
-                msg += int2hex(c);
-                state = 7;
-                return "";
-            }
-            else if (state == 7) {
-                msg_len |= uint16_t(c) << 8;
-                msg += int2hex(c);
-                state = 8;
-                return "";
-            }
-            else if (msg_len && state == 8) {
-                msg_len--;
-                msg += int2hex(c);
-                if (!msg_len)
-                    state = 9;
-                return "";
-            }
-            else if (state == 9) {
-                state = 10;
-                msg += int2hex(c);
-                return "";
-            }
-            else if (state == 10) {
-                state = 0;
-                msg += int2hex(c);
-                return msg;
-            }
-
-            msg += c;
-        }
-        return "";
-    }
-    */
 };
