@@ -12,6 +12,7 @@
 #include <task.h>
 #include "threadsafe_deque.hpp"
 #include "gps_manager.hpp"
+#include "stepper_manager.hpp"
 
 using namespace std;
 
@@ -45,11 +46,11 @@ using namespace std;
 #define COMMS_TX
 #define COMMS_RX
 
-#define PITCH_RATIO 50 / 14
+#define PITCH_RATIO 50.0 / 14.0
 //#define YAW_RATIO 60 / 20
-#define YAW_RATIO 60 / 25
+#define YAW_RATIO 60.0 / 25.0
 
-#define deg2step(deg, ratio) (deg * 32 * 63.68395 / 360 * ratio)
+//#define deg2step(deg, ratio) (deg * 32 * 63.68395 / 360 * ratio)
 
 
 //TODO button controlls
@@ -91,9 +92,10 @@ Wait and read data from PC/Radio
 
 */
 
-AccelStepper stepper_pitch(AccelStepper::FULL4WIRE, PITCH_N1, PITCH_N3, PITCH_N2, PITCH_N4);
-AccelStepper stepper_yaw(AccelStepper::FULL4WIRE, YAW_N1, YAW_N3, YAW_N2, YAW_N4);
-MultiStepper steppers;
+//AccelStepper stepper_pitch(AccelStepper::FULL4WIRE, PITCH_N1, PITCH_N3, PITCH_N2, PITCH_N4);
+//AccelStepper stepper_yaw(AccelStepper::FULL4WIRE, YAW_N1, YAW_N3, YAW_N2, YAW_N4);
+//MultiStepper steppers;
+StepperManager steppers(PITCH_N1, PITCH_N2, PITCH_N3, PITCH_N4, YAW_N1, YAW_N2, YAW_N3, YAW_N4, ENDSTOP_PITCH_MIN, ENDSTOP_YAW_MIN, ENDSTOP_YAW_MAX);
 
 
 int yaw_dir = 1;
@@ -113,142 +115,9 @@ long yaw_steps   = 999999;
 GPSManager gps_manager;
 
 
-/*
-void movePitch(int speed = 500) {
-    if (!pitch_homed) {
-        printf("Need to home PITCH axis first!\n");
-        return;
-    }
-    while (stepper_pitch.distanceToGo()) {
-        if (stepper_pitch.distanceToGo() * pitch_dir < 0 && !digitalRead(ENDSTOP_PITCH_MIN))
-            break;
-        if (stepper_pitch.distanceToGo() * pitch_dir > 0 && stepper_pitch.currentPosition() * pitch_dir >= pitch_steps)
-            break;
-        stepper_pitch.setSpeed(speed);
-        stepper_pitch.runSpeedToPosition();
-    }
-    printf("PITCH: %d\n", stepper_pitch.currentPosition());
-}
-
-void moveYaw(int speed = 500) {
-    if (!yaw_homed) {
-        printf("Need to home YAW axis first!\n");
-        return;
-    }
-    while (stepper_yaw.distanceToGo()) {
-        if ((stepper_yaw.distanceToGo() * yaw_dir > 0 && !digitalRead(ENDSTOP_YAW_MAX)) || (stepper_yaw.distanceToGo() * yaw_dir < 0 && !digitalRead(ENDSTOP_YAW_MIN)))
-            break;
-        stepper_yaw.setSpeed(speed);
-        stepper_yaw.runSpeedToPosition();
-    }
-    printf("YAW: %d\n", stepper_yaw.currentPosition());
-}
-*/
-
-/*
-void movePitchTo(int pos, int speed = 500) {
-    stepper_pitch.moveTo(pos * pitch_dir);
-    movePitch(speed);
-}
-
-void moveYawTo(int pos, int speed = 500) {
-    stepper_yaw.moveTo(pos * yaw_dir);
-    moveYaw(speed);
-}
-*/
-
-/*
-void movePitchBy(int pos, int speed = 500) {
-    stepper_pitch.move(pos * pitch_dir);
-    movePitch(speed);
-}
-
-void moveYawBy(int pos, int speed = 500) {
-    stepper_yaw.move(pos * yaw_dir);
-        moveYaw(speed);
-
-}
-*/
-
-/*
-void calibratePitch() {
-    printf("Calibrating PITCH\n");
-    stepper_pitch.move(4000 * pitch_dir);
-    int togo_orig = stepper_yaw.distanceToGo();
-    //move yaw in loop until endstop is hit
-    while (stepper_pitch.distanceToGo()) {
-        if (!digitalRead(ENDSTOP_PITCH_MIN) && abs(togo_orig - stepper_yaw.distanceToGo()) > 300)
-            break;
-        stepper_pitch.setSpeed(700);
-        stepper_pitch.runSpeedToPosition();
-    }
-
-
-    //wrong direction
-    if (!digitalRead(ENDSTOP_PITCH_MIN)) {
-        pitch_dir = -1;
-        movePitchBy(4000);
-    }
-    stepper_pitch.setCurrentPosition(0);
-    movePitchBy(-30000);
-    pitch_steps = abs(stepper_pitch.currentPosition());
-    stepper_pitch.setCurrentPosition(0);
-    pitch_calibrated = true;
-}
-
-void calibrateYaw() {
-    printf("Calibrating YAW\n");
-    stepper_yaw.move(60000 * yaw_dir);
-    int togo_orig = stepper_yaw.distanceToGo();
-    //move yaw in loop until endstop is hit
-    while (stepper_yaw.distanceToGo()) {
-        if ((!digitalRead(ENDSTOP_YAW_MIN) || !digitalRead(ENDSTOP_YAW_MAX)) && abs(togo_orig - stepper_yaw.distanceToGo()) > 300)
-            break;
-        stepper_yaw.setSpeed(500);
-        stepper_yaw.runSpeedToPosition();
-    }
-    
-    stepper_yaw.setCurrentPosition(0);
-
-    //flip direction if we moved clockwise instead of counter-clockwise and hit MIN endstop
-    yaw_dir = !digitalRead(ENDSTOP_YAW_MAX) ? 1 : -1;
-
-    if (!digitalRead(ENDSTOP_YAW_MIN))
-        moveYawBy(60000);
-    else if (!digitalRead(ENDSTOP_YAW_MAX))
-        moveYawBy(-60000);
-    yaw_steps = abs(stepper_yaw.currentPosition());
-    stepper_yaw.setCurrentPosition(yaw_steps / 2 * yaw_dir);
-    yaw_calibrated = true;
-}
-*/
-
-/*
-void homePitch() {
-    pitch_homed = true;
-    if (!pitch_calibrated)
-        calibratePitch();
-    else
-        movePitchBy(-9999999);
-    stepper_pitch.setCurrentPosition(0);
-    movePitchTo(0);
-}
-
-void homeYaw() {
-    yaw_homed = true;
-    if (!yaw_calibrated)
-        calibrateYaw();
-    else
-        moveYawBy(9999999);
-    stepper_yaw.setCurrentPosition(yaw_steps / 2 * yaw_dir);
-    moveYawTo(0);
-}
-*/
-
 void stepperTask(void *) {
     while (true) {
-        stepper_pitch.runSpeedToPosition();
-        stepper_yaw.runSpeedToPosition();
+        steppers.run();
     }
 }
 
@@ -353,32 +222,45 @@ void commsTask(void *) {
                 }
 
                 else if (cmd == "MOVE_YAW_BY") {
-                    moveYawBy(deg2step(std::stoi(arg), YAW_RATIO));
+                    steppers.moveBy(0, std::stoi(arg));
+                    //moveYawBy(deg2step(std::stoi(arg), YAW_RATIO));
                 }
                 else if (cmd == "MOVE_PITCH_BY") {
-                    movePitchBy(deg2step(std::stoi(arg), PITCH_RATIO));
+                    steppers.moveBy(std::stoi(arg), 0);
+                    //movePitchBy(deg2step(std::stoi(arg), PITCH_RATIO));
                 }
                 else if (cmd == "MOVE_YAW_TO") {
-                    moveYawTo(deg2step(std::stoi(arg), YAW_RATIO));
+                    //TODO
+                    steppers.moveTo(std::stoi(arg), std::stoi(arg));
+                    //moveYawTo(deg2step(std::stoi(arg), YAW_RATIO));
                 }
                 else if (cmd == "MOVE_PITCH_TO") {
-                    movePitchTo(deg2step(std::stoi(arg), PITCH_RATIO));
+                    //TODO
+                    steppers.moveTo(std::stoi(arg), std::stoi(arg));
+                    //movePitchTo(deg2step(std::stoi(arg), PITCH_RATIO));
+                }
+                else if (cmd == "CALIBRATE") {
+                    steppers.calibrate();
                 }
                 else if (cmd == "HOME") {
-                    homePitch();
-                    homeYaw();
+                    steppers.home();
+                    //homePitch();
+                    //homeYaw();
                 }
                 else if (cmd == "HOME_YAW") {
-                    homeYaw();
+                    steppers.home(false, true);
+                    //homeYaw();
                 }
                 else if (cmd == "HOME_PITCH") {
-                    homePitch();
+                    steppers.home(true, false);
+                    //homePitch();
                 }
                 else if (cmd == "DISABLE_STEPPERS") {
-                    stepper_pitch.disableOutputs();
-                    stepper_yaw.disableOutputs();
-                    pitch_homed = false;
-                    yaw_homed = false;
+                    steppers.disable();
+                    //stepper_pitch.disableOutputs();
+                    //stepper_yaw.disableOutputs();
+                    //pitch_homed = false;
+                    //yaw_homed = false;
                 }
                 else {
                     printf("UNKNOWN COMMAND\n");
@@ -405,12 +287,14 @@ void setup() {
     delay(3000);
     Serial.begin(115200);
 
+    steppers.begin(1000, 1000, 500, 500, PITCH_RATIO, YAW_RATIO);
+
     //xTaskCreate()
-    xTaskCreate(gpsTask, "GPS", 2048, nullptr, 0, &gps_task);
+    //xTaskCreate(gpsTask, "GPS", 2048, nullptr, 0, &gps_task);
     xTaskCreate(commsTask, "COMMS", 1024, nullptr, 0, &comms_task);
 
-    stepper_yaw.setMaxSpeed(1000);
-    stepper_pitch.setMaxSpeed(1000);
+    //stepper_yaw.setMaxSpeed(1000);
+    //stepper_pitch.setMaxSpeed(1000);
 
     //xTaskCreate(stepperTask, "STEPPER", 2048, nullptr, 0, &stepper_task);
     //vTaskDelete(nullptr);
@@ -419,10 +303,5 @@ void setup() {
 
 
 void loop() {
-    //vTaskDelay(1);
-    if (pitch_homed)
-        stepper_pitch.runSpeedToPosition();
-    if (yaw_homed)
-        stepper_yaw.runSpeedToPosition();
-
+    steppers.run();
 }
