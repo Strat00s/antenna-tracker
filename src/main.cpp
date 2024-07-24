@@ -50,6 +50,8 @@ using namespace std;
 //#define YAW_RATIO 60 / 20
 #define YAW_RATIO 60.0 / 25.0
 
+#define UTC_OFFSET 2
+
 //#define deg2step(deg, ratio) (deg * 32 * 63.68395 / 360 * ratio)
 
 
@@ -126,43 +128,93 @@ void gpsTask(void *) {
     GPS_SERIAL.setRX(GPS_TX);
     GPS_SERIAL.setFIFOSize(256);
     int ret = gps_manager.begin(&GPS_SERIAL, 115200);
-    if (ret) {
+    if (ret && gps_manager.getVersion()) {
         printf("Failed to change baud rate: %d\n", ret);
-        //TODO report it somewhere
+        vTaskDelete(nullptr);
     }
 
 
-    deque<tuple<uint8_t, uint8_t, vector<uint8_t>>> msg_ubx_q;
-    //msg_ubx_q.push_back({0x06, 0x17,{0, 0x4b, 0, 0b00001000, 0, 0, 0, 0, 1, 0, 0, 0x01, 0, 0, 0, 0, 0, 0, 0, 0}});
-    //msg_ubx_q.push_back({0x06, 0x3E, {}});
-    //msg_ubx_q.push_back({0x06, 0x02, {0, 0, 0, 0, 0b00011111, 1, 0, 0, 0, 0}});
-    
-    unsigned long timer = millis();
+    //protocol config
+    ret = gps_manager.configure(0x02, {0, 0, 0, 0, 0, 0b00011111, 0, 0, 0, 0});
+    if (ret) {
+        printf("Failed to change config: %d\n", ret);
+        printf("FIX!\n");
+        vTaskDelete(nullptr);
+    }
+    //periodic PVT reports
+    ret = gps_manager.configure(0x01, {0x01, 0x07, 0, 1, 0, 0, 0, 0});
+    if (ret) {
+        printf("Failed to change config: %d\n", ret);
+        printf("FIX!\n");
+        vTaskDelete(nullptr);
+    }
 
+    //handle incoming messages
     while (true) {
-        if (gps_manager.read()) {
+        auto ret = gps_manager.read();
+        if (ret > 0) {
             auto last_msg = gps_manager.getLastMsg();
-            Serial.printf("%d %02x %02x %d | ", last_msg.ubx, last_msg.cls, last_msg.id, last_msg.length);
-            for (auto byte : last_msg.payload) {
-                Serial.printf("%02x ", byte);
+            //checksum
+            uint8_t cka = 0;
+            uint8_t ckb = 0;
+            cka += last_msg.cls;
+            ckb += cka;
+            cka += last_msg.id;
+            ckb += cka;
+            cka += last_msg.length;
+            ckb += cka;
+            cka += last_msg.length >> 8;
+            ckb += cka;
+            for (auto i : last_msg.payload) {
+                cka += i;
+                ckb += cka;
             }
-            Serial.printf("| %02x %02x\n", last_msg.cka, last_msg.ckb);
+            if (cka != last_msg.cka || ckb != last_msg.ckb) {
+                printf("Checksum missmatch: %d - %d | %d - %d\n", cka, last_msg.cka, ckb, last_msg.ckb);
+                continue;
+            }
+            //class and id
+            if (last_msg.cls == 0x01 && last_msg.id == 0x07) {
+                //handle it
+                uint32_t itow = uint32_t(last_msg.payload[3]) << 24 | uint32_t(last_msg.payload[2]) << 16 | uint16_t(last_msg.payload[1]) << 8 | last_msg.payload[0];
+
+                uint16_t year = uint16_t(last_msg.payload[5]) << 8 | last_msg.payload[4];
+                uint8_t month = last_msg.payload[6];
+                uint8_t day   = last_msg.payload[7];
+                uint8_t hour  = last_msg.payload[8] + UTC_OFFSET;
+                uint8_t min   = last_msg.payload[9];
+                uint8_t sec   = last_msg.payload[10];
+
+                uint8_t valid = last_msg.payload[11];
+
+                uint32_t tacc = uint32_t(last_msg.payload[15]) << 24 | uint32_t(last_msg.payload[14]) << 16 | uint16_t(last_msg.payload[13]) << 8 | last_msg.payload[12];
+                int32_t nano = uint32_t(last_msg.payload[19]) << 24 | uint32_t(last_msg.payload[18]) << 16 | uint16_t(last_msg.payload[17]) << 8 | last_msg.payload[16];
+
+                uint8_t fix_type = last_msg.payload[20];
+                uint8_t flags    = last_msg.payload[21];
+                uint8_t flags2   = last_msg.payload[22];
+                uint8_t sats     = last_msg.payload[23];
+
+                printf("%02u.%02u.%04u %02u:%02u:%02u.%08lld\n", day, month, year, hour, min, sec, nano);
+                printf("accuracy:   %ldns\n", tacc);
+                printf("valid time: %u\n", valid & 0b00000001);
+                printf("valid date: %u\n", valid >> 1 & 0b00000001);
+                printf("resolved:   %u\n", valid >> 2 & 0b00000001);
+                printf("valid mag:  %u\n\n", valid >> 3 & 0b00000001);
+                printf("sattelites: %u\n", sats);
+                printf("fix type:   %u\n", fix_type);
+            }
+            else {
+                printf("other message: \n");
+                Serial.printf("%d %02x %02x %d | ", last_msg.ubx, last_msg.cls, last_msg.id, last_msg.length);
+                for (auto byte : last_msg.payload) {
+                    Serial.printf("%02x ", byte);
+                }
+                Serial.printf("| %02x %02x\n", last_msg.cka, last_msg.ckb);
+            }
         }
-
-        //string tmp = gps_manager.read();
-        //if (tmp.length()) {
-        //    Serial.printf("%s\n", tmp.c_str());
-        //}
-
-        if (millis() - timer > 2000 && msg_ubx_q.size()) {
-            timer = millis();
-            if (msg_ubx_q.size()) {
-                auto msg = msg_ubx_q.front();
-                for (auto item : get<2>(msg))
-                    printf("%d\n", item);
-                gps_manager.write(get<0>(msg), get<1>(msg), get<2>(msg));
-                msg_ubx_q.pop_front();
-            }
+        else if (ret < 0) {
+            printf("ERROR in read: %d\n", ret);
         }
     }
 }
@@ -185,7 +237,7 @@ void commsTask(void *) {
                 continue;
 
             printf("\n");
-            size_t split = in.find(' ');
+            size_t split = in.find_first_of(' ');
             string cmd = in;
             string arg = "";
 
@@ -221,53 +273,41 @@ void commsTask(void *) {
                     printf("NOT YET IMPLEMENTED\n");
                 }
 
-                else if (cmd == "MOVE_YAW_BY") {
-                    steppers.moveBy(0, std::stoi(arg));
-                    //moveYawBy(deg2step(std::stoi(arg), YAW_RATIO));
+                else if (cmd == "MOVE_BY") {
+                    split = arg.find_first_of(' ');
+                    if (split != string::npos)
+                        steppers.moveBy(std::stoi(arg.substr(0, split)), std::stoi(arg.substr(split + 1)));
+                    else
+                        printf("invalid argument count\n");
                 }
-                else if (cmd == "MOVE_PITCH_BY") {
-                    steppers.moveBy(std::stoi(arg), 0);
-                    //movePitchBy(deg2step(std::stoi(arg), PITCH_RATIO));
-                }
-                else if (cmd == "MOVE_YAW_TO") {
-                    //TODO
-                    steppers.moveTo(std::stoi(arg), std::stoi(arg));
-                    //moveYawTo(deg2step(std::stoi(arg), YAW_RATIO));
-                }
-                else if (cmd == "MOVE_PITCH_TO") {
-                    //TODO
-                    steppers.moveTo(std::stoi(arg), std::stoi(arg));
-                    //movePitchTo(deg2step(std::stoi(arg), PITCH_RATIO));
+                else if (cmd == "MOVE_TO") {
+                    split = arg.find_first_of(' ');
+                    if (split != string::npos)
+                        steppers.moveTo(std::stoi(arg.substr(0, split)), std::stoi(arg.substr(split + 1)));
+                    else
+                        printf("invalid argument count\n");
                 }
                 else if (cmd == "CALIBRATE") {
                     steppers.calibrate();
                 }
                 else if (cmd == "HOME") {
                     steppers.home();
-                    //homePitch();
-                    //homeYaw();
                 }
                 else if (cmd == "HOME_YAW") {
                     steppers.home(false, true);
-                    //homeYaw();
                 }
                 else if (cmd == "HOME_PITCH") {
                     steppers.home(true, false);
-                    //homePitch();
                 }
-                else if (cmd == "DISABLE_STEPPERS") {
+                else if (cmd == "DISABLE") {
                     steppers.disable();
-                    //stepper_pitch.disableOutputs();
-                    //stepper_yaw.disableOutputs();
-                    //pitch_homed = false;
-                    //yaw_homed = false;
                 }
                 else {
                     printf("UNKNOWN COMMAND\n");
                 }
             }
             catch (exception ex) {
-                printf("Invalid argument\n");
+                printf("Exception occured: %s\n", ex.what());
             }
 
             in.clear();
@@ -290,7 +330,7 @@ void setup() {
     steppers.begin(1000, 1000, 500, 500, PITCH_RATIO, YAW_RATIO);
 
     //xTaskCreate()
-    //xTaskCreate(gpsTask, "GPS", 2048, nullptr, 0, &gps_task);
+    xTaskCreate(gpsTask, "GPS", 2048, nullptr, 0, &gps_task);
     xTaskCreate(commsTask, "COMMS", 1024, nullptr, 0, &comms_task);
 
     //stepper_yaw.setMaxSpeed(1000);

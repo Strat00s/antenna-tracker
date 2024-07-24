@@ -160,7 +160,7 @@ public:
             //NMEA data
             else if (state == 1) {
                 if (c == '\r') {
-                    printf("\\R\n");
+                    //printf("\\R\n");
                     state = 2;
                 }
                 else {
@@ -216,7 +216,7 @@ public:
                 state = 8;
                 last_msg.length |= uint16_t(c) << 8;
                 len = last_msg.length;
-                printf("%d\n", len);
+                //printf("%d\n", len);
                 return 0;
             }
             //UBX payload
