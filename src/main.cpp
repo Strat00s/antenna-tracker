@@ -52,268 +52,268 @@ using namespace std;
 
 #define UTC_OFFSET 2
 
-//#define deg2step(deg, ratio) (deg * 32 * 63.68395 / 360 * ratio)
 
 
-//TODO button controlls
-//TODO display
-//TODO GPS config (glonass, gps, beidu, galileo)
-
-
-xTaskHandle gps_task;
-xTaskHandle comms_task;
-xTaskHandle stepper_task;
-xTaskHandle serial_out_task;
-
-
-/*
-//Read config
-Home pitch
-    Slam to end
-    Go to endstop
-    Measure how much was traveled
-Home yaw
-    Go to one endstop
-    Go to sencond endstop
-    Measure how much was traveled
-Home
-    Center yaw, look forward
-Check if there is communication with PC/Radio for coordinations
-    If not, manual operation only
-Check if GPS is connected
-    If so, use it as current HOME location
-    If not, use HOME_XXX messages for current HOME location
-Check if compass is connected
-    If connected - nothing has to be done
-    If not, user must rotate the tracker to face north
-Check if baro is connected
-    If so, use it as current HOME height
-    If not, use HOME_XXX messages for current HOME height
-
-Wait and read data from PC/Radio
-
-*/
-
-//AccelStepper stepper_pitch(AccelStepper::FULL4WIRE, PITCH_N1, PITCH_N3, PITCH_N2, PITCH_N4);
-//AccelStepper stepper_yaw(AccelStepper::FULL4WIRE, YAW_N1, YAW_N3, YAW_N2, YAW_N4);
-//MultiStepper steppers;
 StepperManager steppers(PITCH_N1, PITCH_N2, PITCH_N3, PITCH_N4, YAW_N1, YAW_N2, YAW_N3, YAW_N4, ENDSTOP_PITCH_MIN, ENDSTOP_YAW_MIN, ENDSTOP_YAW_MAX);
 
 
-int yaw_dir = 1;
-int pitch_dir = 1;
+double home_lat  = 0;
+double home_lon  = 0;
+int32_t home_alt = 0;
 
-bool yaw_calibrated = false;
-bool pitch_calibrated = false;
-
-bool yaw_homed = false;
-bool pitch_homed = false;
-
-long pitch_steps = 999999;
-long yaw_steps   = 999999;
-
+double target_lat  = 0;
+double target_lon  = 0;
+int32_t target_alt = 0;
 
 
 GPSManager gps_manager;
 
 
-void stepperTask(void *) {
-    while (true) {
-        steppers.run();
+
+// Function to convert degrees to radians
+double degToRad(double degrees) {
+    return degrees * M_PI / 180.0;
+}
+
+/** @brief Calculate bearing from first location to second with respect to north
+ * 
+ * @param lat1 
+ * @param lon1 
+ * @param lat2 
+ * @param lon2 
+ * @return double
+ */
+double calculateBearing(double lat1, double lon1, double lat2, double lon2) {
+    //convert latitude and longitude from degrees to radians
+    double phi1 = degToRad(lat1);
+    double phi2 = degToRad(lat2);
+    double deltaLambda = degToRad(lon2 - lon1);
+
+    //calculate the bearing
+    double y = std::sin(deltaLambda) * std::cos(phi2);
+    double x = std::cos(phi1) * std::sin(phi2) - std::sin(phi1) * std::cos(phi2) * std::cos(deltaLambda);
+    double theta = std::atan2(y, x);
+
+    //convert the bearing from radians to degrees
+    double thetaDegrees = theta * 180.0 / M_PI;
+
+    //cormalize the angle to be within the range 0° to 360°
+    double bearing = std::fmod((thetaDegrees), 360.0);
+
+    return bearing;
+}
+
+// Function to calculate distance using the Haversine formula
+/** @brief Calculate distance between 2 locations
+ * 
+ * @param lat1 
+ * @param lon1 
+ * @param lat2 
+ * @param lon2 
+ * @return double 
+ */
+double calculateDistance(double lat1, double lon1, double lat2, double lon2) {
+    //convert latitude and longitude from degrees to radians
+    double phi1 = degToRad(lat1);
+    double phi2 = degToRad(lat2);
+    double deltaPhi = degToRad(lat2 - lat1);
+    double deltaLambda = degToRad(lon2 - lon1);
+
+    //haversine formula
+    double a = std::sin(deltaPhi / 2.0) * std::sin(deltaPhi / 2.0) +
+               std::cos(phi1) * std::cos(phi2) * 
+               std::sin(deltaLambda / 2.0) * std::sin(deltaLambda / 2.0);
+    double c = 2.0 * std::atan2(std::sqrt(a), std::sqrt(1.0 - a));
+
+    //distance in kilometers
+    return c * 6371.0 * 1000; //distance in meters
+}
+
+
+/** @brief Calculate angle between 2 elevations.
+ * 
+ * @param height1
+ * @param height2
+ * @param distance Distance in meters.
+ * @return double 
+ */
+double calculatePitchAngle(int32_t height1, int32_t height2, double distance) {
+    return std::atan2(height2 - height1, distance) * 180.0 / M_PI; //back to degrees
+}
+
+
+void handleGps() {
+    auto ret = gps_manager.read();
+    if (!ret)
+        return;
+    if (ret < 0) {
+        printf("ERROR in read: %d\n", ret);
+        return;
+    }
+
+
+    auto last_msg = gps_manager.getLastMsg();
+    //checksum
+    uint8_t cka = 0;
+    uint8_t ckb = 0;
+    cka += last_msg.cls;
+    ckb += cka;
+    cka += last_msg.id;
+    ckb += cka;
+    cka += last_msg.length;
+    ckb += cka;
+    cka += last_msg.length >> 8;
+    ckb += cka;
+    for (auto i : last_msg.payload) {
+        cka += i;
+        ckb += cka;
+    }
+    if (cka != last_msg.cka || ckb != last_msg.ckb) {
+        printf("Checksum missmatch: %d - %d | %d - %d\n", cka, last_msg.cka, ckb, last_msg.ckb);
+        return;
+    }
+
+    //PVT
+    if (last_msg.cls == 0x01 && last_msg.id == 0x07) {
+        //date time
+        uint16_t year = uint16_t(last_msg.payload[5]) << 8 | last_msg.payload[4];
+        uint8_t month = last_msg.payload[6];
+        uint8_t day   = last_msg.payload[7];
+        uint8_t hour  = last_msg.payload[8] + UTC_OFFSET;
+        uint8_t min   = last_msg.payload[9];
+        uint8_t sec   = last_msg.payload[10];
+        uint32_t tacc = uint32_t(last_msg.payload[15]) << 24 | uint32_t(last_msg.payload[14]) << 16 | uint16_t(last_msg.payload[13]) << 8 | last_msg.payload[12];
+
+        uint8_t valid    = last_msg.payload[11]; //valid time, date, mag, fully resolved, 
+        uint8_t fix_type = last_msg.payload[20]; //2d, 3d, ...
+        uint8_t flags    = last_msg.payload[21]; //gnss fix ok
+        uint8_t sats     = last_msg.payload[23]; //number of satelites
+        uint8_t flags3   = last_msg.payload[79]; //invalid lat, lon, height
+
+        home_lat         = (uint32_t(last_msg.payload[31]) << 24 | uint32_t(last_msg.payload[30]) << 16 | uint16_t(last_msg.payload[29]) << 8 | last_msg.payload[28]) * 1e-7;
+        home_lon         = (uint32_t(last_msg.payload[27]) << 24 | uint32_t(last_msg.payload[26]) << 16 | uint16_t(last_msg.payload[25]) << 8 | last_msg.payload[24]) * 1e-7;
+        home_alt         = (uint32_t(last_msg.payload[39]) << 24 | uint32_t(last_msg.payload[38]) << 16 | uint16_t(last_msg.payload[37]) << 8 | last_msg.payload[36]) / 1000;
+    }
+
+    //SAT
+    else if (last_msg.cls == 0x01 && last_msg.id == 0x35) {
+        printf("Sat info\n");
+    }
+
+    else {
+        printf("other message: \n");
+        Serial.printf("%d %02x %02x %d | ", last_msg.ubx, last_msg.cls, last_msg.id, last_msg.length);
+        for (auto byte : last_msg.payload) {
+            Serial.printf("%02x ", byte);
+        }
+        Serial.printf("| %02x %02x\n", last_msg.cka, last_msg.ckb);
     }
 }
 
-void gpsTask(void *) {
-    GPS_SERIAL.setTX(GPS_RX);
-    GPS_SERIAL.setRX(GPS_TX);
-    GPS_SERIAL.setFIFOSize(256);
-    int ret = gps_manager.begin(&GPS_SERIAL, 115200);
-    if (ret && gps_manager.getVersion()) {
-        printf("Failed to change baud rate: %d\n", ret);
-        vTaskDelete(nullptr);
+
+void handleComms() {
+    static string in = "";
+    if (Serial.available() <= 0)
+        return;
+
+    int c = Serial.read();
+    if (c < 0) {
+        printf("\nFailed to read input!\n");
+        return;
     }
-
-
-    //protocol config
-    ret = gps_manager.configure(0x02, {0, 0, 0, 0, 0, 0b00011111, 0, 0, 0, 0});
-    if (ret) {
-        printf("Failed to change config: %d\n", ret);
-        printf("FIX!\n");
-        vTaskDelete(nullptr);
+    if (c != '\n' && c != '\r') {
+        Serial.print(char(c));
+        in += c;
+        return;
     }
-    //periodic PVT reports
-    ret = gps_manager.configure(0x01, {0x01, 0x07, 0, 1, 0, 0, 0, 0});
-    if (ret) {
-        printf("Failed to change config: %d\n", ret);
-        printf("FIX!\n");
-        vTaskDelete(nullptr);
-    }
+    if (!in.length() || c == '\r')
+        return;
 
-    //handle incoming messages
-    while (true) {
-        auto ret = gps_manager.read();
-        if (ret > 0) {
-            auto last_msg = gps_manager.getLastMsg();
-            //checksum
-            uint8_t cka = 0;
-            uint8_t ckb = 0;
-            cka += last_msg.cls;
-            ckb += cka;
-            cka += last_msg.id;
-            ckb += cka;
-            cka += last_msg.length;
-            ckb += cka;
-            cka += last_msg.length >> 8;
-            ckb += cka;
-            for (auto i : last_msg.payload) {
-                cka += i;
-                ckb += cka;
-            }
-            if (cka != last_msg.cka || ckb != last_msg.ckb) {
-                printf("Checksum missmatch: %d - %d | %d - %d\n", cka, last_msg.cka, ckb, last_msg.ckb);
-                continue;
-            }
-            //class and id
-            if (last_msg.cls == 0x01 && last_msg.id == 0x07) {
-                //handle it
-                uint32_t itow = uint32_t(last_msg.payload[3]) << 24 | uint32_t(last_msg.payload[2]) << 16 | uint16_t(last_msg.payload[1]) << 8 | last_msg.payload[0];
+    printf("\n");
+    size_t split = in.find_first_of(' ');
+    string cmd = in;
+    string arg = "";
 
-                uint16_t year = uint16_t(last_msg.payload[5]) << 8 | last_msg.payload[4];
-                uint8_t month = last_msg.payload[6];
-                uint8_t day   = last_msg.payload[7];
-                uint8_t hour  = last_msg.payload[8] + UTC_OFFSET;
-                uint8_t min   = last_msg.payload[9];
-                uint8_t sec   = last_msg.payload[10];
-
-                uint8_t valid = last_msg.payload[11];
-
-                uint32_t tacc = uint32_t(last_msg.payload[15]) << 24 | uint32_t(last_msg.payload[14]) << 16 | uint16_t(last_msg.payload[13]) << 8 | last_msg.payload[12];
-                int32_t nano = uint32_t(last_msg.payload[19]) << 24 | uint32_t(last_msg.payload[18]) << 16 | uint16_t(last_msg.payload[17]) << 8 | last_msg.payload[16];
-
-                uint8_t fix_type = last_msg.payload[20];
-                uint8_t flags    = last_msg.payload[21];
-                uint8_t flags2   = last_msg.payload[22];
-                uint8_t sats     = last_msg.payload[23];
-
-                printf("%02u.%02u.%04u %02u:%02u:%02u.%08lld\n", day, month, year, hour, min, sec, nano);
-                printf("accuracy:   %ldns\n", tacc);
-                printf("valid time: %u\n", valid & 0b00000001);
-                printf("valid date: %u\n", valid >> 1 & 0b00000001);
-                printf("resolved:   %u\n", valid >> 2 & 0b00000001);
-                printf("valid mag:  %u\n\n", valid >> 3 & 0b00000001);
-                printf("sattelites: %u\n", sats);
-                printf("fix type:   %u\n", fix_type);
-            }
-            else {
-                printf("other message: \n");
-                Serial.printf("%d %02x %02x %d | ", last_msg.ubx, last_msg.cls, last_msg.id, last_msg.length);
-                for (auto byte : last_msg.payload) {
-                    Serial.printf("%02x ", byte);
-                }
-                Serial.printf("| %02x %02x\n", last_msg.cka, last_msg.ckb);
-            }
+    //no argument
+    if (split == string::npos) {
+        if (cmd == "CALIBRATE") {
+            steppers.calibrate();
         }
-        else if (ret < 0) {
-            printf("ERROR in read: %d\n", ret);
+        else if (cmd == "HOME") {
+            steppers.home();
+        }
+        else if (cmd == "DISABLE") {
+            steppers.disable();
+        }
+        in.clear();
+        return;
+    }
+
+    cmd = in.substr(0, split);
+    arg = in.substr(split + 1);
+
+    try {
+        if (cmd == "TARGET_LAT") {
+            target_lat = std::stod(arg.substr(0, split));
+            printf("NOT YET TESTED\n");
+        }
+        else if (cmd == "TARGET_LON") {
+            target_lon = std::stod(arg.substr(0, split));
+            printf("NOT YET TESTED\n");
+        }
+        else if (cmd == "TARGET_ALT") {
+            target_alt = std::stoi(arg.substr(0, split));
+            printf("NOT YET TESTED\n");
+        }
+
+        else if (cmd == "ARMED") {
+            printf("NOT YET IMPLEMENTED\n");
+        }
+
+        else if (cmd == "HOME_LAT") {
+            //if not gps || gps lock
+            printf("NOT YET IMPLEMENTED\n");
+        }
+        else if (cmd == "HOME_LON") {
+            //if not gps || gps lock
+            printf("NOT YET IMPLEMENTED\n");
+        }
+        else if (cmd == "HOME_ALT") {
+            //if not gps || gps lock
+            printf("NOT YET IMPLEMENTED\n");
+        }
+
+        else if (cmd == "MOVE_BY") {
+            split = arg.find_first_of(' ');
+            if (split != string::npos)
+                steppers.moveBy(std::stoi(arg.substr(0, split)), std::stoi(arg.substr(split + 1)));
+            else
+                printf("invalid argument count\n");
+        }
+        else if (cmd == "MOVE_TO") {
+            split = arg.find_first_of(' ');
+            if (split != string::npos)
+                steppers.moveTo(std::stoi(arg.substr(0, split)), std::stoi(arg.substr(split + 1)));
+            else
+                printf("invalid argument count\n");
+        }
+        else if (cmd == "HOME_YAW") {
+            steppers.home(false, true);
+        }
+        else if (cmd == "HOME_PITCH") {
+            steppers.home(true, false);
+        }
+        else {
+            printf("UNKNOWN COMMAND\n");
         }
     }
+    catch (exception ex) {
+        printf("Exception occured: %s\n", ex.what());
+    }
+
+    in.clear();
 }
 
-void commsTask(void *) {
-    string in = "";
-    while (true) {
-        if (Serial.available() > 0) {
-            int c = Serial.read();
-            if (c < 0) {
-                printf("\nFailed to read input!\n");
-                continue;
-            }
-            if (c != '\n' && c != '\r') {
-                Serial.print(char(c));
-                in += c;
-                continue;
-            }
-            if (!in.length() || c == '\r')
-                continue;
-
-            printf("\n");
-            size_t split = in.find_first_of(' ');
-            string cmd = in;
-            string arg = "";
-
-            //cmd without argument
-            if (split != string::npos) {
-                cmd = in.substr(0, split);
-                arg = in.substr(split + 1);
-            }
-
-
-            try {
-                if (cmd == "UAV_LAT") {
-                    printf("NOT YET IMPLEMENTED\n");
-                }
-                else if (cmd == "UAV_LON") {
-                    printf("NOT YET IMPLEMENTED\n");
-                }
-                else if (cmd == "UAV_ALT") {
-                    printf("NOT YET IMPLEMENTED\n");
-                }
-
-                else if (cmd == "ARMED") {
-                    printf("NOT YET IMPLEMENTED\n");
-                }
-
-                else if (cmd == "HOME_LAT") {
-                    printf("NOT YET IMPLEMENTED\n");
-                }
-                else if (cmd == "HOME_LON") {
-                    printf("NOT YET IMPLEMENTED\n");
-                }
-                else if (cmd == "HOME_ALT") {
-                    printf("NOT YET IMPLEMENTED\n");
-                }
-
-                else if (cmd == "MOVE_BY") {
-                    split = arg.find_first_of(' ');
-                    if (split != string::npos)
-                        steppers.moveBy(std::stoi(arg.substr(0, split)), std::stoi(arg.substr(split + 1)));
-                    else
-                        printf("invalid argument count\n");
-                }
-                else if (cmd == "MOVE_TO") {
-                    split = arg.find_first_of(' ');
-                    if (split != string::npos)
-                        steppers.moveTo(std::stoi(arg.substr(0, split)), std::stoi(arg.substr(split + 1)));
-                    else
-                        printf("invalid argument count\n");
-                }
-                else if (cmd == "CALIBRATE") {
-                    steppers.calibrate();
-                }
-                else if (cmd == "HOME") {
-                    steppers.home();
-                }
-                else if (cmd == "HOME_YAW") {
-                    steppers.home(false, true);
-                }
-                else if (cmd == "HOME_PITCH") {
-                    steppers.home(true, false);
-                }
-                else if (cmd == "DISABLE") {
-                    steppers.disable();
-                }
-                else {
-                    printf("UNKNOWN COMMAND\n");
-                }
-            }
-            catch (exception ex) {
-                printf("Exception occured: %s\n", ex.what());
-            }
-
-            in.clear();
-        }
-    }
-}
 
 
 
@@ -327,21 +327,61 @@ void setup() {
     delay(3000);
     Serial.begin(115200);
 
+
+    GPS_SERIAL.setTX(GPS_RX);
+    GPS_SERIAL.setRX(GPS_TX);
+    GPS_SERIAL.setFIFOSize(512);
+    int ret = gps_manager.begin(&GPS_SERIAL, 115200);
+    if (ret && gps_manager.getVersion()) {
+        printf("Failed to change baud rate: %d\n", ret);
+        vTaskDelete(nullptr);
+    }
+    ret = gps_manager.configure(0x01, {0x01, 0x07, 1});
+    if (ret) {
+        printf("Failed to change config: %d\n", ret);
+        printf("FIX!\n");
+        vTaskDelete(nullptr);
+    }
+    ret = gps_manager.configure(0x01, {0x01, 0x35, 1});
+    if (ret) {
+        printf("Failed to change config: %d\n", ret);
+        printf("FIX!\n");
+        vTaskDelete(nullptr);
+    }
+
+
     steppers.begin(1000, 1000, 500, 500, PITCH_RATIO, YAW_RATIO);
-
-    //xTaskCreate()
-    xTaskCreate(gpsTask, "GPS", 2048, nullptr, 0, &gps_task);
-    xTaskCreate(commsTask, "COMMS", 1024, nullptr, 0, &comms_task);
-
-    //stepper_yaw.setMaxSpeed(1000);
-    //stepper_pitch.setMaxSpeed(1000);
-
-    //xTaskCreate(stepperTask, "STEPPER", 2048, nullptr, 0, &stepper_task);
-    //vTaskDelete(nullptr);
+    steppers.calibrate();
 }
 
 
+double old_pitch_angle = -99999;
+double old_yaw_angle   = -99999;
 
 void loop() {
+    handleComms();
+    handleGps();
+    if (steppers.isCalibrated()) {
+        auto distance = calculateDistance(home_lat, home_lon, target_lat, target_lon);
+        auto pitch_angle = calculatePitchAngle(home_alt, target_alt, 1000.0);
+        auto yaw_angle = calculateBearing(home_lat, home_lon, target_lat, target_lon);
+
+        if (abs(pitch_angle - old_pitch_angle) >= 5 || abs(yaw_angle - old_yaw_angle) >= 5) {
+            steppers.moveTo(pitch_angle, yaw_angle);
+            old_pitch_angle = pitch_angle;
+            old_yaw_angle = yaw_angle;
+            printf("HOME:\n");
+            printf("  LAT: %lf\n", home_lat);
+            printf("  LON: %lf\n", home_lon);
+            printf("  ALT: %ld\n", home_alt);
+            printf("TARGET:\n");
+            printf("  LAT: %lf\n", target_lat);
+            printf("  LON: %lf\n", target_lon);
+            printf("  ALT: %ld\n", target_alt);
+            printf("RESULT:\n");
+            printf("  PITCH: %lf\n", pitch_angle);
+            printf("  YAW:   %lf\n", yaw_angle);
+        }
+    }
     steppers.run();
 }
