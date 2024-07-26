@@ -33,7 +33,7 @@ private:
     double yaw_ratio = 0;
 
 
-    long deg2step(int deg, double ratio) {
+    long deg2step(double deg, double ratio) {
         //return (deg * 32 * 63.68395 / 360) * (ratio);
         printf("Move by: %d %f -> %f %ld\n", deg, ratio, (2048.0 / 360.0) * deg * (ratio), long((2048.0 / 360.0) * deg * (ratio)));
         return (2048.0 / 360.0) * deg * (ratio);
@@ -122,8 +122,11 @@ public:
         }
     }
 
+    bool isCalibrated() {
+        return calibrated == DONE;
+    }
 
-    void moveTo(int16_t pitch_angle, int16_t yaw_angle) {
+    void moveTo(double pitch_angle, double yaw_angle) {
         if (calibrated != DONE) {
             printf("NOT CALIBRATED!\n");
             return;
@@ -134,7 +137,7 @@ public:
         yaw.moveTo(deg2step(yaw_angle, yaw_ratio) * yaw_dir);
     }
 
-    void moveBy(int16_t pitch_deg, int16_t yaw_deg) {
+    void moveBy(double pitch_deg, double yaw_deg) {
         if (calibrated != DONE) {
             printf("NOT CALIBRATED!\n");
             return;
