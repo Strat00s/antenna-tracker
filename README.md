@@ -23,48 +23,34 @@ Pitch - eleveation
   - [ ] BetaFlight
   - [ ] Ardupilot
 - [ ] Other ways of getting telemetry
-- [ ] Implement tracking
-  - [ ] GPS
+- [X] Implement tracking
+  - [X] GPS
   - [ ] Compass
-  - [ ] Baro
-  - [ ] Gyro
 - [ ] Basic controlls (home, offset, ...)
 - [ ] Basic interface (OLED/LCD)
 
-# Implementation
-- Steppers
-    - Modular speed
-- Endstops
-    - Homing
-- Getting data from radio
-    - UART
-    - USB VCP
-    - SBUS?
-- GPS comms
-    - Get data from GPS
-- Interface
-    - Simple OLED interface
-    - 5 way joystick or 3 buttons
-
 # Communication
-### Protocol
-ACTION DATA\n (data are optional for some actions)
-### Messages
-#### Mandatory (always sent)
-- UAV_LAT D.M.S
-- UAV_LON D.M.S
-- UAV_ALT HEIGHT_IN_M
-- ARMED BOOL
+## Protocol
+ACTION DATA\n (data are optional for some actions and there can be multiple data for single commnad)
+## Messages
+### Mandatory (always sent)
+- UAV_LAT deg
+- UAV_LON deg
+- UAV_ALT m
+- ARMED bool
 
-#### Required if not GPS is connected (sent on ARM)
-- HOME_LAT D.M.S
-- HOME_LON D.M.S
-- HOME_ALT HEIGHT_IN_M
+### Required if no GPS is connected or other than 3D lock is acquired (sent on ARM)
+- HOME_LAT deg
+- HOME_LON deg
+- HOME_ALT m
 
-#### Manual controll (same as buttons, sent when needed)
-- MANUAL_YAW DEG
-- MANUAL_PITCH DEG
+### Manual controll
+- CALIBRATE
 - HOME
+- DISABLE
+- HOME
+- HOME_YAW
+- HOME_PITCH
+- MOVE_TO pitch_deg yaw_deg
+- MOVE_BY pitch_deg yaw_deg
 
-# Config
-Direction for pitch and yaw
